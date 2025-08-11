@@ -195,3 +195,66 @@ FROM dataset_final;
     """
 )
 
+
+
+con.execute(
+    """
+CREATE OR REPLACE TABLE dataset_final_features AS
+SELECT
+    *,
+    LAG(tn, 1) OVER (PARTITION BY product_id, customer_id ORDER BY periodo) AS lag_1,
+    LAG(tn, 2) OVER (PARTITION BY product_id, customer_id ORDER BY periodo) AS lag_2,
+    AVG(tn) OVER (
+        PARTITION BY product_id, customer_id
+        ORDER BY periodo
+        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+    ) AS rolling_mean_3
+FROM dataset_final_features;
+    """
+)
+
+import lightgbm as lgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+
+df = con.execute("SELECT * FROM dataset_final_features").fetchdf()
+
+# Filtrar registros anteriores a 201912
+df = df[df["periodo"] < 201912]
+
+# Variables
+features = ['month', 'year', 'quarter', 'lag_1', 'lag_2', 'rolling_mean_3', 
+            'sku_size', 'plan_precios_cuidados', 'cust_request_qty', 
+            'cust_request_tn']  # podés sumar más
+
+X = df[features]
+y = df["tn"]
+
+X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+model = lgb.LGBMRegressor()
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_valid)
+print("RMSE:", mean_squared_error(y_valid, y_pred, squared=False))
+
+
+# Filtramos productos a predecir
+productos_apredecir = products_to_predict["product_id"].unique()
+df = con.execute("SELECT * FROM dataset_final_features").fetchdf()
+df_predict = df[(df["product_id"].isin(productos_apredecir)) & (df["periodo"] == 201912)].copy()
+
+# Actualizamos periodo a 202002
+df_predict["periodo"] = 202002
+df_predict["year"] = 2020
+df_predict["month"] = 2
+df_predict["quarter"] = 1
+
+# Actualizás los lags como corresponda según tengas los datos de 201911 y 201910 si querés mejorar predicción
+
+# Predicción
+X_pred = df_predict[features]
+df_predict["tn_pred_tplus2"] = model.predict(X_pred)
+
+# Guardar en CSV
+df_predict[["product_id", "customer_id", "periodo", "tn_pred_tplus2"]].to_csv("predicciones_tplus2.csv", index=False)
